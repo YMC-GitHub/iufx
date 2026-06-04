@@ -1,0 +1,72 @@
+#==============================================
+# 官方 Golang 1.26.1 镜像（固定版本）
+#==============================================
+FROM golang:1.26.1 AS builder
+
+# 国内加速环境
+ENV GO111MODULE=on
+ENV GOPROXY=https://goproxy.cn,direct
+ENV GOSUMDB=off
+ENV CGO_ENABLED=1
+
+# RUN sed -i 's|archive.ubuntu.com|mirrors.aliyun.com|g' /etc/apt/sources.list && \
+    # sed -i 's|security.ubuntu.com|mirrors.aliyun.com|g' /etc/apt/sources.list
+
+RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources && \
+    sed -i 's|security.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources
+
+# 安装 Windows 交叉编译器 + 压缩工具
+RUN apt update && apt install -y --no-install-recommends \
+    gcc-mingw-w64-x86-64 upx && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+# COPY . .
+# for slim
+COPY ./cmd/iufx ./cmd/iufx
+
+# 初始化依赖
+RUN go mod init github.com/ymc-github/apkm
+RUN go mod tidy
+
+#--------------------------
+# 构建 Linux amd64
+#--------------------------
+RUN GOOS=linux GOARCH=amd64 \
+    go build -ldflags="-w -s" -o iufx ./cmd/iufx
+RUN upx -9 iufx 2>/dev/null || true
+
+#--------------------------
+# 构建 Windows amd64
+#--------------------------
+RUN CC=x86_64-w64-mingw32-gcc \
+    GOOS=windows GOARCH=amd64 \
+    go build -ldflags="-w -s" -o iufx.exe ./cmd/iufx
+RUN upx -9 iufx.exe 2>/dev/null || true
+
+#==============================================
+# 导出双平台二进制
+#==============================================
+FROM scratch AS export
+COPY --from=builder /app/iufx       ./iufx
+COPY --from=builder /app/iufx.exe   ./iufx.exe
+
+FROM debian:bookworm AS runtime
+
+# 配置阿里云源并安装 tzdata
+RUN sed -i 's/deb.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources && \
+    sed -i 's/security.debian.org/mirrors.aliyun.com/g' /etc/apt/sources.list.d/debian.sources && \
+    apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tzdata ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+# 设置时区为上海
+ENV TZ=Asia/Shanghai
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
+COPY --from=builder /app/iufx /usr/local/bin/iufx
+RUN chmod +x /usr/local/bin/iufx
+
+WORKDIR /app
+
+CMD ["bash"]
